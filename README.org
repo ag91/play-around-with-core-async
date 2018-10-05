@@ -1,0 +1,172 @@
+* Play around with clojure core.async
+ :PROPERTIES:
+ :CREATED:  [2018-10-02 Tue 21:03]
+ :ID:       265f86ea-99c9-452c-8358-fe0159d3d4eb
+ :header-args: :results drawer :dir /tmp :tangle /tmp/play-with-clojure-async.clj
+ :END:
+
+Let's have some fun with clojure async. This is an implementation of
+Communicating Sequential Processes. This is a language/calculus
+created by Hoare to describe systems as an ecosystem of processes. CSP
+is very similar to the actor model, where the main differences are
+that processes are anonymous (actors have an identity), communication
+with processes is synchronous (sending a message to an actor is
+asynchronous as the actor does not need to be free of work) and
+explicit (actors are referenced through names which decouple the actor
+implementation).
+
+A good introduction seems to be:
+https://github.com/clojure/core.async/wiki/Getting-Started
+
+Let's try the adding to channels and taking from channels bit. We want
+to see how some code is run while the channels interact in parallel.
+
+#+BEGIN_SRC clojure :tangle /tmp/project.clj
+(defproject tryclj_lib_to_test "0.1.0-SNAPSHOT"
+  :description "try clj_lib_to_test"
+  :url "http://example.com/FIXME"
+  :license {:name "Eclipse Public License"
+            :url "http://www.eclipse.org/legal/epl-v10.html"}
+  :dependencies [[org.clojure/clojure "1.9.0"]
+                 [org.clojure/test.check "0.10.0-alpha3"]
+                 [org.clojure/core.async "0.4.474"]]
+  :plugins [[refactor-nrepl "2.4.0"]
+            [cider/cider-nrepl "0.18.0"]])
+#+END_SRC
+
+We define a channel:
+
+#+BEGIN_SRC clojure
+(require '[clojure.core.async :as async])
+
+(def a-channel (async/chan 1))
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+nil#'user/a-channel
+:END:
+
+And we put on the channel:
+
+#+BEGIN_SRC clojure
+(async/>!! a-channel "Hello World!")
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+true
+:END:
+
+Note that now trying to put anything else on the channel will block.
+
+Now we can do something else:
+
+#+BEGIN_SRC clojure
+(+ 1 1)
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+2
+:END:
+
+Let's pull then:
+
+#+BEGIN_SRC clojure
+(async/<!! a-channel)
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+"Hello World!"
+:END:
+
+Since a channel is a queue, it can be customized to our needs. For
+example we can make room to many entries in channel:
+
+#+BEGIN_SRC clojure
+(async/chan 10) ;; this maintains 10 entries
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+#object[clojure.core.async.impl.channels.ManyToManyChannel 0x5a95f2ba "clojure.core.async.impl.channels.ManyToManyChannel@5a95f2ba"]
+:END:
+
+We said that an unbuffered channel blocks if we try to put more than
+one element on it. The reason for this is that the channel is using
+the main thread to wait for when the it can add the new element.
+
+Now let's try to assign the put on the channel to another thread:
+
+#+BEGIN_SRC clojure
+(async/>!! a-channel "Hello 1")
+(future (async/>!! a-channel "Hello 2"))
+(async/<!! a-channel)
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+true#future[{:status :pending, :val nil} 0x1f5838fb]"Hello 1"
+:END:
+
+Now we will get the value that was waiting to be added:
+
+#+BEGIN_SRC clojure
+(async/<!! a-channel)
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+"Hello 2"
+:END:
+
+An alternative to manually creating a thread/future, is to use
+go-blocks. =go= is a macro that uses a default thread pool for you (8
+physical threads): all computation started with this constructs reach
+the same pool.
+
+For example:
+
+#+BEGIN_SRC clojure
+(async/go (async/>! a-channel "hello go block"))
+(async/<!! (async/go (async/<! a-channel)))
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+#object[clojure.core.async.impl.channels.ManyToManyChannel 0x51554186 "clojure.core.async.impl.channels.ManyToManyChannel@51554186"]"hello go block"
+:END:
+
+The main pain of =go= block is that closures are not allowed within
+blocks as the macro is limited to flat code
+[fn::https://github.com/clojure/core.async/wiki/Go-Block-Best-Practices].
+
+Also one has to be careful on what to put in the =go= blocks: the
+fixed amount of threads means that feeding a greater amount of
+blocking tasks will slow down the processes (there is no space in the
+thread pool to take in new work to run in parallel).
+
+Naturally there are combinators for listening on multiple channels:
+
+#+BEGIN_SRC clojure :results output
+(let [n 1000
+      cs (repeatedly n async/chan)
+      begin (System/currentTimeMillis)]
+  (doseq [c cs] (async/go (async/>! c "hi")))
+  (dotimes [i n]
+    (let [[v c] (async/alts!! cs)] ; combines 1000 channels
+      (assert (= "hi" v))))
+  (println "Read" n "msgs in" (- (System/currentTimeMillis) begin) "ms"))
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+Read 1000 msgs in 204 ms
+:END:
+
+Note that the =alts!!= combinator has a variant for the =go= block
+called =alts!=.
+
+That's for the little tour of =core.async=.
